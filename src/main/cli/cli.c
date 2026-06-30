@@ -80,6 +80,7 @@ bool cliMode = false;
 #include "drivers/io_impl.h"
 #include "drivers/light_led.h"
 #include "drivers/motor.h"
+#include "drivers/phoneconfig.h"
 #include "drivers/rangefinder/rangefinder_hcsr04.h"
 #include "drivers/resource.h"
 #include "drivers/sdcard.h"
@@ -3519,7 +3520,18 @@ static void cliRebootEx(rebootTarget_e rebootTarget)
 {
     cliPrint("\r\nRebooting");
     cliWriterFlush();
-    waitForSerialPortToFinishTransmitting(cliPort);
+
+#ifdef USE_PHONE_CONFIG
+    // in phone-config the virtual msp port is drained by a scheduler task that can't run while we
+    // spin in waitForSerialPortToFinishTransmitting(), so skip that wait here or it would hang. a
+    // firmware reboot (e.g. 'save') re-enters phone-config below rather than normal mode, so the
+    // usb-ncm link comes straight back and the configurator reconnects with the saved config applied.
+    if (!phoneConfigCheckBootAndReset())
+#endif
+    {
+        waitForSerialPortToFinishTransmitting(cliPort);
+    }
+
     motorShutdown();
 
     switch (rebootTarget) {
@@ -3535,6 +3547,11 @@ static void cliRebootEx(rebootTarget_e rebootTarget)
 #endif
     case REBOOT_TARGET_FIRMWARE:
     default:
+#ifdef USE_PHONE_CONFIG
+        if (phoneConfigCheckBootAndReset()) {
+            systemResetToPhoneConfig();   // re-enter phone-config so the link returns (never returns)
+        }
+#endif
         systemReset();
 
         break;
@@ -3585,6 +3602,14 @@ static void cliExit(const char *cmdName, char *cmdline)
     cliMode = false;
     // incase a motor was left running during motortest, clear it here
     mixerResetDisarmedMotors();
+#ifdef USE_PHONE_CONFIG
+    // in phone-config, 'exit' just leaves cli mode and stays connected, it must not reboot (that is
+    // what 'save' is for). keeps the usb-ncm link up so the configurator can go back to msp for the
+    // other tabs without dropping the connection.
+    if (phoneConfigCheckBootAndReset()) {
+        return;
+    }
+#endif
     cliReboot();
 }
 
@@ -6420,6 +6445,23 @@ static void cliMsc(const char *cmdName, char *cmdline)
 }
 #endif
 
+#if defined(USE_PHONE_CONFIG)
+static void cliPhoneConfig(const char *cmdName, char *cmdline)
+{
+    UNUSED(cmdName);
+    UNUSED(cmdline);
+
+    cliPrintHashLine("Restarting in phone-config (USB network) mode");
+    cliPrint("\r\nRebooting. Power-cycle the board to return to normal Betaflight.");
+    cliPrint("\r\nRecover any time via DFU: hold the BOOT button while plugging in USB.");
+    cliWriterFlush();
+    waitForSerialPortToFinishTransmitting(cliPort);
+    motorShutdown();
+
+    systemResetToPhoneConfig();
+}
+#endif
+
 typedef void cliCommandFn(const char* name, char *cmdline);
 
 typedef struct {
@@ -6547,6 +6589,9 @@ const clicmd_t cmdTable[] = {
 #else
     CLI_COMMAND_DEF("msc", "switch into msc mode", NULL, cliMsc),
 #endif
+#endif
+#ifdef USE_PHONE_CONFIG
+    CLI_COMMAND_DEF("phoneconfig", "reboot into phone usb-network mode", NULL, cliPhoneConfig),
 #endif
 #ifndef MINIMAL_CLI
     CLI_COMMAND_DEF("play_sound", NULL, "[<index>]", cliPlaySound),

@@ -44,6 +44,7 @@ COMMON_SRC = \
             drivers/sound_beeper.c \
             drivers/stack_check.c \
             drivers/system.c \
+            drivers/phoneconfig.c \
             drivers/timer_common.c \
             drivers/transponder_ir_arcitimer.c \
             drivers/transponder_ir_ilap.c \

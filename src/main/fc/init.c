@@ -81,6 +81,7 @@
 #ifdef USE_USB_MSC
 #include "drivers/usb_msc.h"
 #endif
+#include "drivers/phoneconfig.h"
 #include "drivers/vtx_common.h"
 #include "drivers/vtx_rtc6705.h"
 #include "drivers/vtx_table.h"
@@ -516,6 +517,13 @@ void init(void)
     uartPinConfigure(serialPinConfig());
 #endif
 
+#ifdef USE_PHONE_CONFIG
+    // phone-config boot runs the full flight controller but brings usb up as a cdc-ncm gadget
+    // serving msp/cli over tcp instead of a cdc-acm serial port. detect once here, it caches and
+    // clears the rtc flag, and the result gates the usb/net hooks below and TASK_PHONE_CONFIG_NET.
+    const bool phoneConfigBoot = phoneConfigCheckBootAndReset();
+#endif
+
 #if defined(AVOID_UART1_FOR_PWM_PPM)
     serialInit(featureIsEnabled(FEATURE_SOFTSERIAL),
             featureIsEnabled(FEATURE_RX_PPM) || featureIsEnabled(FEATURE_RX_PARALLEL_PWM) ? SERIAL_PORT_USART1 : SERIAL_PORT_NONE);
@@ -526,7 +534,13 @@ void init(void)
     serialInit(featureIsEnabled(FEATURE_SOFTSERIAL),
             featureIsEnabled(FEATURE_RX_PPM) || featureIsEnabled(FEATURE_RX_PARALLEL_PWM) ? SERIAL_PORT_USART3 : SERIAL_PORT_NONE);
 #else
+#ifdef USE_PHONE_CONFIG
+    // disable the usb cdc-acm (vcp) port in phone-config mode so it never opens, the usb device
+    // comes up as cdc-ncm via phoneConfigUsbStart() below instead.
+    serialInit(featureIsEnabled(FEATURE_SOFTSERIAL), phoneConfigBoot ? SERIAL_PORT_USB_VCP : SERIAL_PORT_NONE);
+#else
     serialInit(featureIsEnabled(FEATURE_SOFTSERIAL), SERIAL_PORT_NONE);
+#endif
 #endif
 
     mixerInit(mixerConfig()->mixerMode);
@@ -626,6 +640,18 @@ void init(void)
         } else {
             systemResetFromMsc();
         }
+    }
+#endif
+
+#ifdef USE_PHONE_CONFIG
+    // phone-config mode: opt-in usb mode for configuring over a cable from a phone, requested via
+    // the `phoneconfig` cli command. a power-cycle returns to normal betaflight, dfu always works.
+    if (phoneConfigBoot) {
+        // bring usb up as the cdc-ncm gadget (the vcp was disabled in serialInit above). this does
+        // not block, init() continues so sensors, rx and the scheduler all start. lwip and the
+        // msp-over-tcp server come up after mspSerialInit() below and run in TASK_PHONE_CONFIG_NET.
+        ledInit(statusLedConfig());
+        phoneConfigUsbStart();
     }
 #endif
 
@@ -873,6 +899,15 @@ void init(void)
     // Initialize MSP
     mspInit();
     mspSerialInit();
+
+#ifdef USE_PHONE_CONFIG
+    // bring up lwip, the dhcp server and the msp-over-tcp server, and register the tcp link as a
+    // virtual msp serial port. must run after mspSerialInit(), which clears the msp ports array.
+    // from here the stock TASK_SERIAL serves msp and cli over it against the fully-running fc.
+    if (phoneConfigBoot) {
+        phoneConfigNetStart();
+    }
+#endif
 
 /*
  * CMS, display devices and OSD
